@@ -1,0 +1,40 @@
+name: Deploy Bassetti TV to Pages
+
+on:
+  push:
+    branches: ["main"]
+
+  # Permite execução manual a partir da aba Actions
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Código Fonte
+        uses: actions/checkout@v4
+
+      - name: Configurar Infraestrutura do GitHub Pages
+        uses: actions/configure-pages@v4
+
+      - name: Fazer Upload do Artefato do Site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Faz o upload do diretório raiz completo
+          path: '.'
+
+      - name: Realizar Deploy no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
