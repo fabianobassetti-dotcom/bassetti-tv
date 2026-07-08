@@ -1,2 +1,2 @@
-LINK_TV_OFFLINE=http://08.stmip.net:8046
+LINK_TV_OFFLINE=https://08.stmip.net:8046
 LINK_RADIO_ONLINE=https://cameras.santoandre.sp.gov.br/coi04/ID_587
