@@ -10,8 +10,11 @@ let hlsInstance = null;
 let radioAudioInstance = null;
 let monitoramentoRadioInterval = null;
 
-// Caminho do arquivo de texto externo que conterá a URL da câmera
-const ARQUIVO_CONFIG_CAMERA = "config-camera.txt"; 
+// Nova constante apontando para o arquivo de configuração dupla
+const ARQUIVO_CONFIG_VISUAL = "config-radio-visual.txt"; 
+
+// Armazena o estado do que está passando na tela para evitar recarregamentos repetidos no loop
+let estadoVisualAtual = null; // "OFFLINE" ou "ONLINE"
 
 // Elementos do DOM
 const DOM = {
@@ -43,12 +46,10 @@ function inicializarListeners() {
         renderizarCanais();
     });
 
-    // Abas de Filtros Topo da Sidebar
     DOM.tabTodos.addEventListener('click', () => alternarFiltro('TODOS', DOM.tabTodos));
     DOM.tabFavs.addEventListener('click', () => alternarFiltro('FAVORITOS', DOM.tabFavs));
     DOM.tabHist.addEventListener('click', () => alternarFiltro('HISTORICO', DOM.tabHist));
 
-    // Botão Favoritar
     DOM.btnFav.addEventListener('click', gerenciarFavoritos);
 }
 
@@ -59,7 +60,6 @@ function alternarFiltro(tipo, elementoBotao) {
     renderizarCanais();
 }
 
-// Consome e processa o arquivo M3U gerado pelo Hub
 async function carregarPlaylist() {
     atualizarStatus("Buscando playlist do repositório backend...");
     try {
@@ -73,12 +73,11 @@ async function carregarPlaylist() {
         atualizarStatus(`Canais carregados com sucesso: ${totalCanais.length} disponíveis.`);
     } catch (erro) {
         console.error(CONFIG.LOG_PREFIX, erro);
-        DOM.channelsList.innerHTML = `<div class="loading-message" style="color: #ff4a4a;">Erro ao carregar canais. Verifique a URL do Hub.</div>`;
+        DOM.channelsList.innerHTML = `<div class="loading-message" style="color: #ff4a4a;">Erro ao carregar canais.</div>`;
         atualizarStatus("Erro crítico na importação da playlist.");
     }
 }
 
-// Parser M3U simples e otimizado para o formato do Hub
 function parseM3U(dadosBrutos) {
     const linhas = dadosBrutos.split('\n');
     let canalAtual = null;
@@ -88,12 +87,8 @@ function parseM3U(dadosBrutos) {
         
         if (line.startsWith('#EXTINF:')) {
             canalAtual = {};
-            
-            // Regex para captura das chaves/atributos M3U
             const logoMatch = line.match(/tvg-logo="([^"]*)"/);
             const groupMatch = line.match(/group-title="([^"]*)"/);
-            
-            // O nome do canal vem logo após a última vírgula do #EXTINF
             const virgulaIndex = line.lastIndexOf(',');
             const nomeCanal = virgulaIndex !== -1 ? line.substring(virgulaIndex + 1).stripOrNormal() : "Canal Sem Nome";
 
@@ -103,30 +98,40 @@ function parseM3U(dadosBrutos) {
         } else if (line && !line.startsWith('#') && canalAtual) {
             canalAtual.url = line;
             totalCanais.push(canalAtual);
-            canalAtual = null; // Reseta ponteiro
+            canalAtual = null;
         }
     }
 }
 
-// Extensão utilitária para strings
 String.prototype.stripOrNormal = function() {
     return this.trim();
 };
 
-// Busca assíncrona da URL da câmera contida no arquivo TXT externo
-async function obterUrlCameraExterna() {
+// Parser inteligente que lê o arquivo TXT e extrai as duas variáveis separadamente
+async function obterConfiguracoesVisuaisExternas() {
+    let configs = { tvOffline: "", radioOnline: "" };
     try {
-        const resposta = await fetch(ARQUIVO_CONFIG_CAMERA);
-        if (!resposta.ok) throw new Error("Arquivo externo não encontrado");
-        const urlTexto = await resposta.text();
-        return urlTexto.trim();
+        const resposta = await fetch(ARQUIVO_CONFIG_VISUAL);
+        if (!resposta.ok) throw new Error("Arquivo de configuração visual não encontrado");
+        const texto = await resposta.text();
+        const linhas = texto.split('\n');
+
+        linhas.forEach(linha => {
+            if (linha.includes('LINK_TV_OFFLINE=')) {
+                configs.tvOffline = linha.replace('LINK_TV_OFFLINE=', '').trim();
+            }
+            if (linha.includes('LINK_RADIO_ONLINE=')) {
+                configs.radioOnline = linha.replace('LINK_RADIO_ONLINE=', '').trim();
+            }
+        });
     } catch (erro) {
-        console.warn("Falha ao ler URL externa. Usando fallback padrão.", erro);
-        return "https://cameras.santoandre.sp.gov.br/coi04/ID_597"; 
+        console.warn("Falha ao ler TXT de configuração visual. Usando fallbacks.", erro);
+        configs.tvOffline = "https://cameras.santoandre.sp.gov.br/coi04/ID_597";
+        configs.radioOnline = "https://wz4.camera.com.br/santoandre/live.stream/playlist.m3u8";
     }
+    return configs;
 }
 
-// Reconhece nativamente se a URL de streaming de áudio está respondendo
 function verificarSinalStream(url) {
     return new Promise(resolve => {
         const testeAudio = new Audio();
@@ -141,7 +146,6 @@ function verificarSinalStream(url) {
 
         testeAudio.src = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
         testeAudio.load();
-
         setTimeout(() => finalizar(false), 4000);
     });
 }
@@ -149,12 +153,10 @@ function verificarSinalStream(url) {
 function popularCategorias() {
     const gruposUnicos = new Set(totalCanais.map(c => c.grupo));
     const gruposOrdenados = Array.from(gruposUnicos).sort();
-    
     if(gruposOrdenados.includes("BRAZIL")) {
         gruposOrdenados.splice(gruposOrdenados.indexOf("BRAZIL"), 1);
         gruposOrdenados.unshift("BRAZIL");
     }
-
     gruposOrdenados.forEach(grupo => {
         const option = document.createElement('option');
         option.value = grupo;
@@ -166,7 +168,6 @@ function popularCategorias() {
 function renderizarCanais() {
     DOM.channelsList.innerHTML = '';
     const busca = DOM.search.value.toLowerCase().trim();
-
     let canaisFiltrados = [...totalCanais];
 
     if (filtroAtual === 'FAVORITOS') {
@@ -174,15 +175,12 @@ function renderizarCanais() {
     } else if (filtroAtual === 'HISTORICO') {
         canaisFiltrados = historico.map(url => totalCanais.find(c => c.url === url)).filter(Boolean);
     }
-
     if (categoriaSelecionada !== 'TODOS' && filtroAtual === 'TODOS') {
         canaisFiltrados = canaisFiltrados.filter(c => c.grupo === categoriaSelecionada);
     }
-
     if (busca) {
         canaisFiltrados = canaisFiltrados.filter(c => c.nome.toLowerCase().includes(busca));
     }
-
     if (canaisFiltrados.length === 0) {
         DOM.channelsList.innerHTML = '<div class="loading-message">Nenhum canal localizado.</div>';
         return;
@@ -197,31 +195,56 @@ function renderizarCanais() {
 
         const imgElement = document.createElement('img');
         imgElement.className = 'channel-logo';
-        
         let limpaLogo = (canal.logo || '').replace(/['"]/g, '').trim();
         imgElement.src = limpaLogo || imgPlaceholder;
-        
-        imgElement.onerror = function() {
-            this.src = imgPlaceholder;
-            this.onerror = null;
-        };
+        imgElement.onerror = function() { this.src = imgPlaceholder; this.onerror = null; };
 
         const infoContainer = document.createElement('div');
         infoContainer.className = 'channel-info';
-        infoContainer.innerHTML = `
-            <div class="channel-name"></div>
-            <div class="channel-group"></div>
-        `;
-        
+        infoContainer.innerHTML = `<div class="channel-name"></div><div class="channel-group"></div>`;
         infoContainer.querySelector('.channel-name').textContent = canal.nome;
         infoContainer.querySelector('.channel-group').textContent = canal.grupo;
 
         item.appendChild(imgElement);
         item.appendChild(infoContainer);
-
         item.addEventListener('click', () => carregarCanalNoPlayer(canal));
         DOM.channelsList.appendChild(item);
     });
+}
+
+// Injeta de forma dinâmica o sinal visual (iFrame ou Player de Vídeo HLS)
+function aplicarFluxoVisualNoPlayer(urlVisual, forcarMudo = false) {
+    if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
+    const iframeAntigo = document.getElementById('iframe-estetico-radio');
+    if (iframeAntigo) { iframeAntigo.remove(); }
+
+    DOM.video.style.display = "block";
+    DOM.video.removeAttribute('src');
+    DOM.video.type = "";
+    DOM.video.muted = forcarMudo;
+
+    if (urlVisual.includes(".m3u8") || urlVisual.includes(".mp4")) {
+        if (Hls.isSupported()) {
+            hlsInstance = new Hls({ maxBufferLength: 10, enableWorker: true });
+            hlsInstance.loadSource(urlVisual);
+            hlsInstance.attachMedia(DOM.video);
+            hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => { DOM.video.play(); });
+        } else if (DOM.video.canPlayType('application/vnd.apple.mpegurl')) {
+            DOM.video.src = urlVisual;
+            DOM.video.addEventListener('loadedmetadata', () => { DOM.video.play(); });
+        }
+    } else {
+        DOM.video.style.display = "none"; 
+        const iframeCamera = document.createElement('iframe');
+        iframeCamera.id = "iframe-estetico-radio";
+        iframeCamera.src = urlVisual;
+        iframeCamera.style.width = "100%";
+        iframeCamera.style.height = "100%";
+        iframeCamera.style.border = "none";
+        iframeCamera.style.borderRadius = "4px";
+        iframeCamera.setAttribute("allow", "autoplay");
+        DOM.video.parentElement.appendChild(iframeCamera);
+    }
 }
 
 async function carregarCanalNoPlayer(canal) {
@@ -232,151 +255,87 @@ async function carregarCanalNoPlayer(canal) {
     DOM.placeholder.classList.add('hidden');
     DOM.currentTitle.textContent = canal.nome;
     DOM.currentGroup.textContent = canal.grupo;
-    if (canal.logo) {
-        DOM.currentLogo.src = canal.logo;
-        DOM.currentLogo.classList.remove('hidden');
-    } else {
-        DOM.currentLogo.classList.add('hidden');
-    }
+    if (canal.logo) { DOM.currentLogo.src = canal.logo; DOM.currentLogo.classList.remove('hidden'); } 
+    else { DOM.currentLogo.classList.add('hidden'); }
 
     DOM.btnFav.classList.remove('hidden');
     atualizarBotaoFavoritoUI(canal.url);
     gerenciarHistorico(canal.url);
 
-    // Limpa loops de checagem anteriores
-    if (monitoramentoRadioInterval) {
-        clearInterval(monitoramentoRadioInterval);
-        monitoramentoRadioInterval = null;
-    }
-
-    // Desliga rádio ativa de segundo plano ao mudar de canal
-    if (radioAudioInstance) {
-        radioAudioInstance.pause();
-        radioAudioInstance.src = "";
-        radioAudioInstance = null;
-    }
-
-    // Destrói instâncias do HLS.js
-    if (hlsInstance) {
-        hlsInstance.destroy();
-        hlsInstance = null;
-    }
-
-    // Remove iFrames estéticos antigos
+    // Reseta estados anteriores
+    estadoVisualAtual = null;
+    if (monitoramentoRadioInterval) { clearInterval(monitoramentoRadioInterval); monitoramentoRadioInterval = null; }
+    if (radioAudioInstance) { radioAudioInstance.pause(); radioAudioInstance.src = ""; radioAudioInstance = null; }
+    if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
     const iframeAntigo = document.getElementById('iframe-estetico-radio');
-    if (iframeAntigo) {
-        iframeAntigo.remove();
-    }
+    if (iframeAntigo) { iframeAntigo.remove(); }
     
     DOM.video.style.display = "block";
     DOM.video.removeAttribute('src');
-    DOM.video.type = "";
-    DOM.video.muted = false; // Áudio padrão ativado inicialmente
+    DOM.video.muted = false;
 
-    // DETECTOR DE ÁUDIO/RÁDIO
     const urlNormalizada = canal.url.toLowerCase();
     const isRadio = canal.grupo === "RADIOS" || urlNormalizada.includes("zeno.fm") || urlNormalizada.includes("zenofm.com");
 
     if (isRadio) {
         let urlSegura = canal.url.replace("http://", "https://");
-        
-        if (urlSegura.endsWith("/playlist.m3u8")) {
-            urlSegura = urlSegura.replace("/playlist.m3u8", "");
-        } else if (urlSegura.endsWith(".m3u8") || urlSegura.endsWith(".m3u")) {
-            urlSegura = urlSegura.substring(0, urlSegura.lastIndexOf('.'));
-        }
-        
-        if (urlSegura.endsWith("/live")) {
-            urlSegura = urlSegura.replace("/live", "");
-        }
+        if (urlSegura.endsWith("/playlist.m3u8")) urlSegura = urlSegura.replace("/playlist.m3u8", "");
+        else if (urlSegura.endsWith(".m3u8") || urlSegura.endsWith(".m3u")) urlSegura = urlSegura.substring(0, urlSegura.lastIndexOf('.'));
+        if (urlSegura.endsWith("/live")) urlSegura = urlSegura.replace("/live", "");
 
-        // LEITURA DINÂMICA DO ARQUIVO EXTERNO (.txt)
-        const urlVisualExterna = await obterUrlCameraExterna();
-
-        // INICIALIZAÇÃO DO VISUAL DA TRANSMISSÃO (iFrame ou Player HLS)
-        if (urlVisualExterna.includes(".m3u8") || urlVisualExterna.includes(".mp4")) {
-            if (Hls.isSupported()) {
-                hlsInstance = new Hls({ maxBufferLength: 10, enableWorker: true });
-                hlsInstance.loadSource(urlVisualExterna);
-                hlsInstance.attachMedia(DOM.video);
-                hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => { DOM.video.play(); });
-            } else if (DOM.video.canPlayType('application/vnd.apple.mpegurl')) {
-                DOM.video.src = urlVisualExterna;
-                DOM.video.addEventListener('loadedmetadata', () => { DOM.video.play(); });
-            }
-        } else {
-            DOM.video.style.display = "none"; 
-            const iframeCamera = document.createElement('iframe');
-            iframeCamera.id = "iframe-estetico-radio";
-            iframeCamera.src = urlVisualExterna;
-            iframeCamera.style.width = "100%";
-            iframeCamera.style.height = "100%";
-            iframeCamera.style.border = "none";
-            iframeCamera.style.borderRadius = "4px";
-            iframeCamera.setAttribute("allow", "autoplay");
-            DOM.video.parentElement.appendChild(iframeCamera);
-        }
-
-        // FUNÇÃO DE GERENCIAMENTO INTELIGENTE DE SINAL (FAILOVER)
-        const gerenciarSinalAudio = async () => {
+        // ENGRENAGEM DE CHAVEAMENTO DE PLATÔ DINÂMICO (PRO)
+        const gerenciarChaveamentoVisualERadio = async () => {
             const radioOnline = await verificarSinalStream(urlSegura);
+            const urlsConfig = await obterConfiguracoesVisuaisExternas();
 
             if (radioOnline) {
-                // SINAL DA RÁDIO OK: Muta a transmissão da TV/Câmera e prioriza a rádio
-                DOM.video.muted = true;
+                // CENÁRIO 1: RÁDIO ONLINE -> Transmite áudio da rádio e chaveia a imagem pro canal "ONLINE" (mudo)
+                if (estadoVisualAtual !== "ONLINE") {
+                    estadoVisualAtual = "ONLINE";
+                    aplicarFluxoVisualNoPlayer(urlsConfig.radioOnline, true);
+                }
                 if (!radioAudioInstance) {
                     radioAudioInstance = new Audio(urlSegura);
                     radioAudioInstance.play()
-                        .then(() => atualizarStatus(`Rádio Online: Transmitindo ${canal.nome} + Vídeo de Fundo`))
-                        .catch(e => console.error("Erro ao dar play no áudio da rádio:", e));
+                        .then(() => atualizarStatus(`Modo Visual Radio Ativo: ${canal.nome}`))
+                        .catch(e => console.error("Erro no play da rádio:", e));
                 }
             } else {
-                // SEM SINAL DA RÁDIO: Desliga a instância da rádio e libera o som original do streaming da TV/Câmera
+                // CENÁRIO 2: RÁDIO OFFLINE -> Desliga áudio da rádio e chaveia de volta para o canal "OFFLINE" (com áudio original)
                 if (radioAudioInstance) {
                     radioAudioInstance.pause();
                     radioAudioInstance.src = "";
                     radioAudioInstance = null;
                 }
-                DOM.video.muted = false; 
-                atualizarStatus(`Rádio Offline. Reproduzindo áudio original do canal de vídeo.`);
+                if (estadoVisualAtual !== "OFFLINE") {
+                    estadoVisualAtual = "OFFLINE";
+                    aplicarFluxoVisualNoPlayer(urlsConfig.tvOffline, false); // false mantêm o áudio original do canal offline
+                }
+                atualizarStatus(`Rádio Offline. Retornou para a programação da TV.`);
             }
         };
 
-        // Roda a checagem imediatamente no clique
-        await gerenciarSinalAudio();
-        // Deixa monitorando o sinal a cada 8 segundos para evitar quedas abruptas
-        monitoramentoRadioInterval = setInterval(gerenciarSinalAudio, 8000);
+        await gerenciarChaveamentoVisualERadio();
+        monitoramentoRadioInterval = setInterval(gerenciarChaveamentoVisualERadio, 8000);
             
     } else {
-        // FLUXO PADRÃO (Canais de TV Normais)
+        // FLUXO DE CANAL DE TV CONVENCIONAL
         if (Hls.isSupported()) {
             hlsInstance = new Hls({ maxBufferLength: 10, enableWorker: true });
             hlsInstance.loadSource(canal.url);
             hlsInstance.attachMedia(DOM.video);
-            hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-                DOM.video.play();
-            });
-            hlsInstance.on(Hls.Events.ERROR, function (evento, dados) {
-                if (dados.fatal) {
-                    atualizarStatus(`Erro de rede ou mídia ao abrir: ${canal.nome}`);
-                }
-            });
+            hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => { DOM.video.play(); });
         } else if (DOM.video.canPlayType('application/vnd.apple.mpegurl')) {
             DOM.video.src = canal.url;
-            DOM.video.addEventListener('loadedmetadata', () => {
-                DOM.video.play();
-            });
+            DOM.video.addEventListener('loadedmetadata', () => { DOM.video.play(); });
         }
-        
         atualizarStatus(`Transmitindo agora: ${canal.nome}`);
     }
 }
 
-// Funções Helpers e Armazenamentos Locais
 function gerenciarFavoritos() {
     const url = DOM.video.dataset.currentUrl;
     if (!url) return;
-
     if (favoritos.includes(url)) {
         favoritos = favoritos.filter(f => f !== url);
         atualizarStatus("Removido dos favoritos.");
